@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openbb-arcticdb"
+version = "0.1.0"
+description = "ArcticDB integration for OpenBB: read stored bars as a provider, and persist any OBBject result to ArcticDB."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+dependencies = [
+    "openbb-core>=1.5.8",
+    "arcticdb>=6.0",
+]
+
+# Read path: `provider="arcticdb"` serves data stored in an ArcticDB library.
+[project.entry-points."openbb_provider_extension"]
+arcticdb = "openbb_arcticdb:arcticdb_provider"
+
+# Write path: `result.arcticdb.write(...)` persists an OBBject result to ArcticDB.
+[project.entry-points."openbb_obbject_extension"]
+arcticdb = "openbb_arcticdb:ext"
+
+[tool.setuptools.packages.find]
+include = ["openbb_arcticdb*"]
