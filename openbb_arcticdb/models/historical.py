@@ -89,7 +89,10 @@ def _pandas_ohlcv(df, rule: str, origin: str = "start_day"):
     agg = {cl[k]: fn for k, fn in _OHLC if k in cl}
     if "volume" in cl:
         agg[cl["volume"]] = "sum"
-    return df.resample(rule, origin=origin).agg(agg).dropna(how="all")
+    out = df.resample(rule, origin=origin).agg(agg)
+    # Drop empty buckets (e.g. gaps): sum() volume is 0 but OHLC are NaN.
+    subset = [cl[k] for k in ("close", "open") if k in cl]
+    return out.dropna(subset=subset) if subset else out.dropna(how="all")
 
 
 def _ohlcv_agg(columns) -> dict:
