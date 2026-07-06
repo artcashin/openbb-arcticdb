@@ -18,9 +18,9 @@ directions**:
   obb.crypto.price.historical("BTCUSD", provider="arcticdb", start_date="2026-01-01")
   ```
 - **Tick → OHLCV on read** — pass `interval` to resample a stored tick symbol
-  (a `price` column + optional `size`/`volume`) into OHLCV bars. Seconds, minutes,
-  hours and days are resampled server-side via ArcticDB's `QueryBuilder.resample`;
-  weeks and months add a pandas step on the daily bars (ArcticDB stops at days).
+  (a `price` column + optional `size`/`volume`) into OHLCV bars. ArcticDB filters
+  by `date_range` on the server; the resample itself is done client-side with
+  pandas.
   ```python
   obb.equity.price.historical("XYZ", provider="arcticdb", library="ticks",
                               interval="1m", start_date="2026-06-01", end_date="2026-06-02")

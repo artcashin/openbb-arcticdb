@@ -11,6 +11,7 @@ Usage:
 Env fallbacks: ARCTICDB_URI, ARCTICDB_LIBRARY (CLI args take precedence).
 Defaults to a local LMDB store under OPENBB_HOME (no server needed).
 """
+# Requires: pip install openbb[yfinance] openbb-arcticdb
 import argparse
 import os
 import sys

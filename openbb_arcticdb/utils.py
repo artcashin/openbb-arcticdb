@@ -1,6 +1,7 @@
 """ArcticDB connection helpers shared by the provider and the OBBject accessor."""
 
 import os
+import threading
 from typing import Any
 
 
@@ -117,8 +118,16 @@ def to_bounds(start: Any, end: Any):
     return start_ts, end_ts
 
 
+# Cache open Arctic connections keyed by URI so a session reuses them.
+# Reads run under asyncio.to_thread, so guard construction with a lock: for
+# LMDB, two Arctic handles to the same path in one process is exactly what the
+# cache exists to prevent, and a check-then-act race could still create two.
+_arctic_cache: dict = {}  # uri -> Arctic
+_arctic_cache_lock = threading.Lock()
+
+
 def get_library(uri: str, library: str, create_if_missing: bool = True):
-    """Open (and optionally create) an ArcticDB library."""
+    """Open (and optionally create) an ArcticDB library. Connections are cached by URI."""
     # pylint: disable=import-outside-toplevel
     from arcticdb import Arctic
 
@@ -128,7 +137,10 @@ def get_library(uri: str, library: str, create_if_missing: bool = True):
         if path:
             os.makedirs(path, exist_ok=True)
 
-    ac = Arctic(uri)
+    with _arctic_cache_lock:
+        ac = _arctic_cache.get(uri)
+        if ac is None:
+            ac = _arctic_cache[uri] = Arctic(uri)
     if not create_if_missing and not ac.has_library(library):
         raise FileNotFoundError(
             f"ArcticDB library '{library}' does not exist at '{uri}'. "

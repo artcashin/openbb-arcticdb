@@ -21,15 +21,15 @@ class ArcticDBAccessor:
     """Persist and manage OBBject results in ArcticDB."""
 
     def __init__(self, obbject):
-        """Bind the accessor to its OBBject."""
+        """Bind the accessor to its OBBject and build a default store."""
         self._obbject = obbject
+        self._default_store = _make_store(None, None)
 
-    @staticmethod
-    def _store(uri: Optional[str], library: Optional[str]):
-        # pylint: disable=import-outside-toplevel
-        from openbb_arcticdb.store import ArcticStore
-
-        return ArcticStore(uri=uri, library=library)
+    def _store(self, uri: Optional[str], library: Optional[str]):
+        """Return the default store, or a new one if overrides are given."""
+        if uri is None and library is None:
+            return self._default_store
+        return _make_store(uri, library)
 
     def write(
         self,
@@ -71,3 +71,11 @@ class ArcticDBAccessor:
     ) -> dict[str, Any]:
         """Delete a symbol from the library."""
         return self._store(uri, library).delete(key)
+
+
+def _make_store(uri: Optional[str], library: Optional[str]):
+    """Build an ArcticStore, resolving config on first access."""
+    # pylint: disable=import-outside-toplevel
+    from openbb_arcticdb.store import ArcticStore
+
+    return ArcticStore(uri=uri, library=library)

@@ -42,12 +42,12 @@ from pydantic import Field, field_validator
 _OHLC = (("open", "first"), ("high", "max"), ("low", "min"), ("close", "last"))
 
 
-def _resample_spec(interval: str) -> tuple[str, Optional[str]]:
-    """Map an interval to (arctic_native_rule, pandas_rule).
+def _resample_spec(interval: str) -> str:
+    """Map an interval to a pandas-compatible resample rule.
 
-    ArcticDB resamples natively only up to days (s, min, h, D). Weeks and months
-    are done with a second pandas resample on the daily bars, so this returns a
-    native rule for ArcticDB plus an optional pandas rule to apply afterwards.
+    Resampling happens client-side via pandas (server-side would require a
+    separate column-detection read). All intervals — seconds, minutes, hours,
+    days, weeks, months — are handled in one pass.
 
     Note: lowercase 'm' is MINUTE (1m, 5m); month is 'mo'/'mon'/'month' or
     uppercase 'M' (1mo, 3mo, 1M); week is 'w'/'wk'/'week' (1w, 2w).
@@ -63,61 +63,77 @@ def _resample_spec(interval: str) -> tuple[str, Optional[str]]:
     raw_unit = m.group(2)
     unit = raw_unit.lower()
 
-    # Month: uppercase 'M' (distinct from minute) or explicit month words.
     if raw_unit == "M" or unit in {"mo", "mon", "month", "months", "mth"}:
-        return "1D", f"{n}ME"  # daily server-side, then pandas month-end
+        return f"{n}ME"
     if unit in {"w", "wk", "week", "weeks"}:
-        return "1D", f"{n}W"  # daily server-side, then pandas weekly
-    native = {
+        return f"{n}W"
+    pandas_unit = {
         "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
         "m": "min", "min": "min", "mins": "min", "minute": "min", "minutes": "min", "t": "min",
         "h": "h", "hr": "h", "hour": "h", "hours": "h",
         "d": "D", "day": "D", "days": "D",
     }.get(unit)
-    if native is None:
+    if pandas_unit is None:
         raise OpenBBError(
             f"Unsupported interval '{interval}'. Supported: seconds (s), minutes "
             "(m/min), hours (h), days (d), weeks (w), months (mo/M) — e.g. '1m', "
             "'5m', '1h', '1d', '1w', '2w', '1mo', '3mo'."
         )
-    return f"{n}{native}", None
+    return f"{n}{pandas_unit}"
 
 
 def _pandas_ohlcv(df, rule: str, origin: str = "start_day"):
-    """Resample daily OHLCV bars into a coarser (weekly/monthly) frame with pandas."""
-    cl = {str(c).lower(): c for c in df.columns}
-    agg = {cl[k]: fn for k, fn in _OHLC if k in cl}
-    if "volume" in cl:
-        agg[cl["volume"]] = "sum"
-    out = df.resample(rule, origin=origin).agg(agg)
-    # Drop empty buckets (e.g. gaps): sum() volume is 0 but OHLC are NaN.
-    subset = [cl[k] for k in ("close", "open") if k in cl]
-    return out.dropna(subset=subset) if subset else out.dropna(how="all")
+    """Resample any tabular data into OHLCV bars at the given interval.
 
-
-def _ohlcv_agg(columns) -> dict:
-    """Build a resample aggregation from whatever columns the symbol has.
-
-    Downsamples existing OHLCV, or aggregates tick data (a price column + an
-    optional size/volume column) into OHLCV.
+    Handles both full OHLCV columns and tick data (a single price column with
+    an optional volume/size column).  Pandas ``.resample().agg()`` is limited
+    to existing column names, so the tick path builds the result explicitly.
     """
-    cl = {str(c).lower(): c for c in columns}
+    # pylint: disable=import-outside-toplevel
+    import pandas as pd
+
+    cl = {str(c).lower(): c for c in df.columns}
+    resampled = df.resample(rule, origin=origin)
+
     if {"open", "high", "low", "close"} <= set(cl):
-        agg = {k: (cl[k], fn) for k, fn in _OHLC}
+        agg = {cl[k]: fn for k, fn in _OHLC if k in cl}
         if "volume" in cl:
-            agg["volume"] = (cl["volume"], "sum")
-        return agg
-    price = next((cl[c] for c in ("price", "last", "close", "trade_price", "p") if c in cl), None)
-    if price is None:
-        raise OpenBBError(
-            "Cannot resample to OHLCV: symbol has neither OHLC columns nor a "
-            "recognizable price column (price/last/close)."
+            agg[cl["volume"]] = "sum"
+        out = resampled.agg(agg)
+        # Normalize to canonical lowercase names (agg keys carry the stored
+        # column's original case, e.g. "Open"); the standard OHLCV models and
+        # the tick path below both key on lowercase open/high/low/close/volume.
+        out.columns = [str(c).lower() for c in out.columns]
+        result_cols = list(out.columns)
+    else:
+        price = next(
+            (cl[c] for c in ("price", "last", "close", "trade_price", "p") if c in cl),
+            None,
         )
-    agg = {k: (price, fn) for k, fn in _OHLC}
-    vol = next((cl[c] for c in ("size", "volume", "qty", "quantity", "amount", "v") if c in cl), None)
-    if vol is not None:
-        agg["volume"] = (vol, "sum")
-    return agg
+        if price is None:
+            raise OpenBBError(
+                "Cannot resample to OHLCV: symbol has neither OHLC columns nor a "
+                "recognizable price column (price/last/close)."
+            )
+        out = pd.DataFrame(
+            {
+                "open": resampled[price].first(),
+                "high": resampled[price].max(),
+                "low": resampled[price].min(),
+                "close": resampled[price].last(),
+            }
+        )
+        vol = next(
+            (cl[c] for c in ("size", "volume", "qty", "quantity", "amount", "v") if c in cl),
+            None,
+        )
+        if vol is not None:
+            out["volume"] = resampled[vol].sum()
+        result_cols = list(out.columns)
+
+    # Drop empty buckets (e.g. gaps): sum() volume is 0 but OHLC are NaN.
+    subset = [c for c in ("close", "open") if c in result_cols]
+    return out.dropna(subset=subset) if subset else out.dropna(how="all")
 
 
 async def _extract_bars(query, credentials: Optional[dict]) -> list[dict]:
@@ -135,15 +151,11 @@ async def _extract_bars(query, credentials: Optional[dict]) -> list[dict]:
     # No interval -> assume daily. (OpenBB also strips interval=="1d" since it's the
     # global default, so an absent interval most often means the caller asked for 1d.)
     interval = getattr(query, "interval", None) or "1d"
-    native_rule, pandas_rule = _resample_spec(interval)
-    # Bucket anchoring: pandas default (start_day) vs ArcticDB epoch.
+    pandas_rule = _resample_spec(interval)
     pandas_anchor = bool(getattr(query, "pandas_anchor", False))
     start_ts, end_ts = to_bounds(query.start_date, query.end_date)
 
     def _read() -> list[dict]:
-        # pylint: disable=import-outside-toplevel
-        from arcticdb import QueryBuilder
-
         lib = get_library(uri, library, create_if_missing=False)
         rng = None if start_ts is None and end_ts is None else (start_ts, end_ts)
         out: list[dict] = []
@@ -152,24 +164,19 @@ async def _extract_bars(query, credentials: Optional[dict]) -> list[dict]:
             if not lib.has_symbol(sym):
                 missing.append(sym)
                 continue
-            # Resample (tick or finer bars) -> OHLCV at the native rule, server-side.
-            head = lib.read(sym, row_range=(0, 1)).data
-            # ArcticDB rejects string origins (e.g. 'start_day') together with a
-            # date_range, so emulate pandas 'start_day' with a midnight Timestamp.
+            # Single read: ArcticDB filters by date_range on the server; the
+            # resample is done client-side with pandas.
+            df = lib.read(sym, date_range=rng).data
+            if df is None or df.empty:
+                continue
             if pandas_anchor:
                 ref = start_ts if start_ts is not None else (
-                    head.index[0] if len(head.index) else None
+                    df.index[0] if len(df.index) else None
                 )
                 origin = ref.normalize() if ref is not None else "epoch"
             else:
                 origin = "epoch"
-            qb = QueryBuilder().resample(native_rule, origin=origin).agg(
-                _ohlcv_agg(head.columns)
-            )
-            df = lib.read(sym, date_range=rng, query_builder=qb).data
-            # Weeks/months: pandas re-resample the daily bars (ArcticDB stops at D).
-            if pandas_rule and df is not None and not df.empty:
-                df = _pandas_ohlcv(df, pandas_rule, origin=origin)
+            df = _pandas_ohlcv(df, pandas_rule, origin=origin)
             if df is None or df.empty:
                 continue
             df = df.reset_index()
@@ -227,8 +234,8 @@ def _build_fetcher(label: str, qp_base, data_base):
         pandas_anchor: bool = Field(
             default=False,
             description=(
-                "Bucket anchoring for resampling. False (default) uses ArcticDB's "
-                "epoch anchor (origin='epoch'); True uses the pandas default anchor "
+                "Bucket anchoring for resampling. False (default) uses an epoch "
+                "origin ('epoch'); True uses the pandas default anchor "
                 "(origin='start_day'). Affects where bar boundaries fall."
             ),
         )
